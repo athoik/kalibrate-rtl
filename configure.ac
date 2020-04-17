@@ -47,14 +47,19 @@ case "$host_os" in
 		AC_DEFINE([D_HOST_OPENBSD], [], [building for OpenBSD])
 		;;
 	*)
+		case "$host_cpu" in
+			arm*)
+				AC_DEFINE([D_MMAP], [], [building without shared memory])
+				;;
+			mips*)
+				AC_DEFINE([D_MMAP], [], [building without shared memory])
+				;;
+			*)
+				AC_DEFINE([D_SHM], [], [building with Linux shared memory])
+				;;
+		esac
 		LRT_FLAGS="-lrt"
 		AC_SUBST(LRT_FLAGS)
-		;;
-esac
-
-case "$host_cpu" in
-	arm*)
-		AC_DEFINE([D_HOST_OSX], [], [building without shared memory])
 		;;
 esac
 

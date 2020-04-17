@@ -40,20 +40,19 @@
 #include <stdexcept>
 #include <sys/types.h>
 #include <sys/stat.h>
-#ifndef D_HOST_OSX
-#ifndef _WIN32
+#ifdef D_SHM
 #include <sys/shm.h>
 #endif
-#else
+#ifndef _WIN32
 #include <sys/mman.h>
 #include <fcntl.h>
-#endif /* !D_HOST_OSX */
+#endif
 
 #include "circular_buffer.h"
 //#include <cstdio>
 
-#ifndef D_HOST_OSX
-#ifndef _WIN32
+#if defined(D_SHM)
+
 circular_buffer::circular_buffer(const unsigned int buf_len,
    const unsigned int item_size, const unsigned int overwrite) {
 
@@ -184,7 +183,8 @@ circular_buffer::~circular_buffer() {
 	shmdt((char *)m_base);
 }
 
-#else
+#elif defined(_WIN32)
+
 circular_buffer::circular_buffer(const unsigned int buf_len,
    const unsigned int item_size, const unsigned int overwrite) {
 
@@ -268,9 +268,8 @@ circular_buffer::~circular_buffer() {
 	UnmapViewOfFile(d_second_copy);
 	CloseHandle(d_handle);
 }
-#endif
-#else /* !D_HOST_OSX */
 
+#elif defined(D_HOST_OSX)
 
 /*
  * OSX doesn't support System V shared memory.  Using GNU Radio as an example,
@@ -387,7 +386,121 @@ circular_buffer::~circular_buffer() {
 
 	munmap(m_base, 2 * m_pagesize + 2 * m_buf_size);
 }
-#endif /* !D_HOST_OSX */
+
+#elif defined(D_MMAP)
+
+circular_buffer::circular_buffer(const unsigned int buf_len,
+   const unsigned int item_size, const unsigned int overwrite) {
+
+	int tmp_fd;
+	void *base;
+
+	if(!buf_len)
+		throw std::runtime_error("circular_buffer: buffer len is 0");
+
+	if(!item_size)
+		throw std::runtime_error("circular_buffer: item size is 0");
+
+	// calculate buffer size
+	m_item_size = item_size;
+	m_buf_size = item_size * buf_len;
+
+	m_pagesize = getpagesize();
+	if(m_buf_size % m_pagesize)
+		m_buf_size = (m_buf_size + m_pagesize) & ~(m_pagesize - 1);
+	m_buf_len = m_buf_size / item_size;
+
+	// create a temporary file
+	if((tmp_fd = open("/tmp/", O_RDWR | O_TMPFILE, 0644)) == -1) {
+		perror("open");
+		throw std::runtime_error("circular_buffer: open");
+	}
+
+	// create enough space to hold everything
+	if(ftruncate(tmp_fd, 2 * m_pagesize + 2 * m_buf_size) == -1) {
+		perror("ftruncate");
+		close(tmp_fd);
+		throw std::runtime_error("circular_buffer: ftruncate");
+	}
+
+	// get an address for the buffer
+	if((base = mmap(0, 2 * m_pagesize + 2 * m_buf_size, PROT_NONE, MAP_SHARED, tmp_fd, 0)) == MAP_FAILED) {
+		perror("mmap");
+		close(tmp_fd);
+		throw std::runtime_error("circular_buffer: mmap (base)");
+	}
+
+	// unmap everything but the first guard page
+	if(munmap((char *)base + m_pagesize, m_pagesize + 2 * m_buf_size) == -1) {
+		perror("munmap");
+		close(tmp_fd);
+		throw std::runtime_error("circular_buffer: munmap");
+	}
+
+	// race condition
+
+	// map first copy of the buffer
+	if(mmap((char *)base + m_pagesize, m_buf_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, tmp_fd, m_pagesize) == MAP_FAILED) {
+		perror("mmap");
+		munmap(base, 2 * m_pagesize + 2 * m_buf_size);
+		close(tmp_fd);
+		throw std::runtime_error("circular_buffer: mmap (buf 1)");
+	}
+
+	// map second copy of the buffer
+	if(mmap((char *)base + m_pagesize + m_buf_size, m_buf_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, tmp_fd, m_pagesize) == MAP_FAILED) {
+		perror("mmap");
+		munmap(base, 2 * m_pagesize + 2 * m_buf_size);
+		close(tmp_fd);
+		throw std::runtime_error("circular_buffer: mmap (buf 2)");
+	}
+
+	// map second copy of the guard page
+	if(mmap((char *)base + m_pagesize + 2 * m_buf_size, m_pagesize, PROT_NONE, MAP_SHARED | MAP_FIXED, tmp_fd, 0) == MAP_FAILED) {
+		perror("mmap");
+		munmap(base, 2 * m_pagesize + 2 * m_buf_size);
+		close(tmp_fd);
+		throw std::runtime_error("circular_buffer: mmap (guard)");
+	}
+
+	// both the file and name are unnecessary now
+	close(tmp_fd);
+
+	// save the base address for unmap later
+	m_base = base;
+
+	// save a pointer to the data
+	m_buf = (char *)base + m_pagesize;
+
+	m_r = m_w = 0;
+	m_read = m_written = 0;
+
+	m_item_size = item_size;
+
+	m_overwrite = overwrite;
+
+	pthread_mutex_init(&m_mutex, 0);
+}
+
+
+circular_buffer::~circular_buffer() {
+
+	munmap(m_base, 2 * m_pagesize + 2 * m_buf_size);
+}
+
+#else /* !D_SHM !_WIN32 !D_HOST_OSX !D_MMAP */
+
+circular_buffer::circular_buffer(const unsigned int buf_len,
+   const unsigned int item_size, const unsigned int overwrite) {
+
+	throw std::runtime_error("circular_buffer: unknown circular_buffer configuration. Please use D_SHM, _WIN32, D_HOST_OSX or D_MMAP");
+}
+
+
+circular_buffer::~circular_buffer() {
+}
+
+#endif
 
 
 /*
